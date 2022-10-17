@@ -1,65 +1,95 @@
 import json
 import sys
 import time
+from typing import Optional
 
 import requests
 
-from building_releases.main import GITLAB_URL, HEADERS
+from building_releases import settings
+from building_releases.analysis_porject import ProjectInfo
 
 
-def check_pipelines(
-        project_id: str,
-        status_code: int,
-        text: str,
-        new_name_tag: str,
-) -> str:
-    # Переменная для запоминая id нужного pipeline.
-    pipeline_id = None
+class AnalysisPipeline(object):
+    """Класс для анализа pipelines в Gitlab."""
 
-    if status_code == 200:
-        # Преобразуем text ответа в json.
-        json_text = json.loads(text)
+    def __init__(self, project: ProjectInfo, new_name_tag: str, *args, **kwargs):  # noqa: E501
+        """Инициализируем переменные для работы."""
+        self.project = project
+        self.name_tag = new_name_tag
 
-        # Ищем в pipelines нужный pipeline по имени тега и запоминаем его id.
-        for pipeline in json_text:
-            if pipeline.get('ref') == new_name_tag:
-                pipeline_id = pipeline.get('id')
-
-        if pipeline_id:
-            check_status(project_id, pipeline_id)
-        else:
-            print(f'Нет pipeline для проекта: {project_id}')
-            sys.exit()
-
-    print(f'Проблема с pipelines  в проекте: {project_id}')
-    sys.exit()
-
-
-def check_status(project_id: str, pipeline_id: int):
-    """Проверяем статус pipeline каждую минуту."""
-    status = None
-    count = 0
-
-    while status in {'success', 'failed'}:
-        if count < 10:
-            count += 1
-        else:
-            print('Долго ждем получение статуса, проверить надо.')
-            sys.exit()
-
-        time.sleep(60)
-        response_get_pipeline = requests.get(
-            url=f'{GITLAB_URL}api/v4/projects/{project_id}/pipelines/{pipeline_id}',  # noqa: E501
-            headers=HEADERS,
+        self.url = '{gitlab}/api/v4/projects/{id}/pipelines'.format(
+            gitlab=settings.GITLAB_URL,
+            id=self.project.info.id,
+        )
+        self.response = requests.get(
+            url=self.url,
+            headers=settings.HEADERS,
             timeout=10,
         )
-        if response_get_pipeline.status_code == 200:
-            json_text = json.loads(response_get_pipeline.text)
-            status = json_text.get('status')
-        else:
-            print(
-                f'Получение pipeline с id {pipeline_id} невозможно' +
-                f'Код: {response_get_pipeline.status_code}. ' +
-                f'Текст: {response_get_pipeline.text}',
+
+        self.pipeline_id: Optional[int] = None
+        self.url_pipeline = '{gitlab}/api/v4/projects/{project_id}/pipelines{pipeline_id}'  # noqa: E501
+
+    def check_pipelines(self):
+
+        if self.response.status_code == 200:
+            # Преобразуем text ответа в json и анализируем.
+            for pipeline in json.loads(self.response.text):
+                if pipeline.get('ref') == self.name_tag:
+                    self.pipeline_id = pipeline.get('id')
+
+            if self.pipeline_id:
+                self.check_status()
+            else:
+                print(
+                    f'Нет pipeline c именем {self.name_tag} для проекта: +'
+                    f'{self.project.info.name}.',
+                )
+                sys.exit()
+
+        print(
+            f'Проблема с pipelines в проекте: {self.project.info.name}.' +
+            f'Код: {self.response.status_code}. Текст {self.response.text}.'
+        )
+        sys.exit()
+
+    def check_status(self):
+        """Проверяем статус pipeline каждую минуту."""
+        status = None
+        count = 0
+
+        # Пока не будет получен результат, анализируем pipelines.
+        # Максимум анализируем 10 минут.
+        while status not in {'success', 'failed'}:
+
+            if count < 10:
+                count += 1
+
+            else:
+                print(
+                    f'В проекте {self.project.info.name} долго крутятся ' +
+                    f'pipeline. Необходимо проверить.'
+                )
+                sys.exit()
+
+            time.sleep(60)
+            response = requests.get(
+                url=self.url_pipeline.format(
+                    gitlab=settings.GITLAB_URL,
+                    project_id=self.project.info.id,
+                    pipeline_id=self.pipeline_id,
+                ),
+                headers=settings.HEADERS,
+                timeout=10,
             )
-            sys.exit()
+
+            if response.status_code == 200:
+                json_text = json.loads(response.text)
+                status = json_text.get('status')
+            else:
+                print(
+                    f'Получение pipeline в проекте {self.project.info.name} ' +
+                    f'с id {self.pipeline_id} невозможно.' +
+                    f'Код: {response.status_code}. Текст: {response.text}',
+                )
+                sys.exit()
